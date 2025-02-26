@@ -7,12 +7,13 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Any, Optional, Set
 import subprocess
 import shutil
+import threading
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QComboBox, QProgressBar, QListWidget, QFrame,
                              QRadioButton, QButtonGroup, QMessageBox, QStyle)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QRunnable, QThreadPool
 from PyQt6.QtGui import QIcon, QFont, QKeySequence, QShortcut, QPixmap, QCursor
 import yt_dlp
 
@@ -61,6 +62,29 @@ def get_service_name(url: str) -> str:
         return 'Mail.ru'
     return 'Неизвестный сервис'
 
+# Константы с паттернами URL для разных сервисов
+URL_PATTERNS = {
+    'YouTube': [
+        r'^https?://(?:www\.)?youtube\.com/watch\?v=[\w-]{11}(?:&\S*)?$',
+        r'^https?://youtu\.be/[\w-]{11}(?:\?\S*)?$',
+        r'^https?://(?:www\.)?youtube\.com/shorts/[\w-]{11}(?:\?\S*)?$',
+        r'^https?://(?:www\.)?youtube\.com/embed/[\w-]{11}(?:\?\S*)?$'
+    ],
+    'VK': [
+        r'^https?://(?:www\.)?vk\.com/video-?\d+_\d+(?:\?\S*)?$',
+        r'^https?://(?:www\.)?vkvideo\.ru/video-?\d+_\d+(?:\?\S*)?$'
+    ],
+    'RuTube': [
+        r'^https?://(?:www\.)?rutube\.ru/video/[\w-]{32}/?(?:\?\S*)?$',
+        r'^https?://(?:www\.)?rutube\.ru/play/embed/[\w-]{32}/?(?:\?\S*)?$'
+    ],
+    'Одноклассники': [
+        r'^https?://(?:www\.)?ok\.ru/video/\d+(?:\?\S*)?$'
+    ],
+    'Mail.ru': [
+        r'^https?://(?:www\.)?my\.mail\.ru/(?:[\w/]+/)?video/(?:[\w/]+/)\d+\.html(?:\?\S*)?$'
+    ]
+}
 
 class ResolutionWorker(QThread):
     resolutions_found = pyqtSignal(list)
@@ -72,6 +96,7 @@ class ResolutionWorker(QThread):
 
     def run(self) -> None:
         try:
+            logger.info(f"Получение доступных разрешений для: {self.url}")
             ydl_opts: Dict[str, Any] = {'quiet': True, 'no_warnings': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info: Dict[str, Any] = ydl.extract_info(self.url, download=False)
@@ -85,52 +110,66 @@ class ResolutionWorker(QThread):
                 sorted_resolutions: List[str] = sorted(list(resolutions),
                                                        key=lambda x: int(x.replace('p', '')),
                                                        reverse=True)
+            logger.info(f"Найдены разрешения: {sorted_resolutions}")
             self.resolutions_found.emit(sorted_resolutions)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            logger.exception(f"Ошибка при получении разрешений: {self.url}")
+            user_friendly_error = "Не удалось получить доступные разрешения. Проверьте URL и подключение к интернету."
+            self.error_occurred.emit(user_friendly_error)
 
-
-class DownloadThread(QThread):
-    progress = pyqtSignal(str, float)
-    finished = pyqtSignal(bool, str, str)
-
+# Реализация QRunnable для работы с QThreadPool
+class DownloadRunnable(QRunnable):
+    class Signals(QObject):
+        progress = pyqtSignal(str, float)
+        finished = pyqtSignal(bool, str, str)
+        
     def __init__(self, url: str, mode: str, resolution: Optional[str] = None,
                  output_dir: str = 'downloads') -> None:
-        """
-        Поток загрузки видео/аудио.
-        :param url: URL видео.
-        :param mode: Режим загрузки ('video' или 'audio').
-        :param resolution: Разрешение для видео (если применимо).
-        :param output_dir: Директория для сохранения.
-        """
         super().__init__()
-        self.url: str = url
-        self.mode: str = mode
-        self.resolution: Optional[str] = resolution
-        self.is_cancelled: bool = False
-        self.output_dir: str = output_dir
-        self.downloaded_filename: Optional[str] = None
-
+        self.url = url
+        self.mode = mode
+        self.resolution = resolution
+        self.output_dir = output_dir
+        self.signals = self.Signals()
+        self.cancel_event = threading.Event()
+        self.downloaded_filename = None
+        
         os.makedirs(output_dir, exist_ok=True)
-
+        
     def run(self) -> None:
         try:
-            logger.info(f"Начало загрузки: {self.url}")
+            logger.info(f"Начало загрузки (QRunnable): {self.url}")
             if self.mode == 'video':
-                success: bool = self.download_video()
+                success = self.download_video()
             else:
                 success = self.download_audio()
 
             if success:
                 logger.info(f"Загрузка завершена успешно: {self.url}")
-                self.finished.emit(True, "Загрузка завершена", self.downloaded_filename or "")
+                self.signals.finished.emit(True, "Загрузка завершена", self.downloaded_filename or "")
             else:
-                logger.warning(f"Загрузка отменена: {self.url}")
-                self.finished.emit(False, "Загрузка отменена", "")
+                logger.info(f"Загрузка отменена: {self.url}")
+                self.signals.finished.emit(False, "Загрузка отменена", "")
         except Exception as e:
-            logger.error(f"Ошибка загрузки: {str(e)}", exc_info=True)
-            self.finished.emit(False, f"Ошибка: {str(e)}", "")
-
+            logger.exception(f"Ошибка загрузки: {self.url}")
+            error_message = self.get_user_friendly_error_message(str(e))
+            self.signals.finished.emit(False, error_message, "")
+            
+    def get_user_friendly_error_message(self, error: str) -> str:
+        """Преобразует технические сообщения об ошибках в понятные для пользователя"""
+        if "HTTP Error 404" in error:
+            return "Ошибка: Видео не найдено (404). Возможно, оно было удалено или является приватным."
+        elif "HTTP Error 403" in error:
+            return "Ошибка: Доступ запрещен (403). Видео может быть недоступно в вашем регионе."
+        elif "Sign in to confirm your age" in error or "age-restricted" in error:
+            return "Ошибка: Видео имеет возрастные ограничения и требует авторизации."
+        elif "SSL" in error or "подключени" in error.lower() or "connect" in error.lower():
+            return "Ошибка подключения. Проверьте соединение с интернетом или попробуйте позже."
+        elif "copyright" in error.lower() or "copyright infringement" in error:
+            return "Ошибка: Видео недоступно из-за нарушения авторских прав."
+        else:
+            return f"Ошибка загрузки: {error}"
+            
     def download_video(self) -> bool:
         try:
             if not self.resolution:
@@ -156,18 +195,16 @@ class DownloadThread(QThread):
                 'no_warnings': True,
                 'quiet': True,
             }
-            logger.info(f"Опции yt-dlp: {ydl_opts}")
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Передаём разрешение для использования в шаблоне имени файла
                 ydl.params['resolution'] = self.resolution
                 ydl.download([self.url])
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка загрузки видео: {str(e)}", exc_info=True)
-            raise Exception(f"Ошибка загрузки видео: {str(e)}")
-
+            logger.exception(f"Ошибка загрузки видео")
+            raise
+            
     def download_audio(self) -> bool:
         try:
             ydl_opts: Dict[str, Any] = {
@@ -185,11 +222,11 @@ class DownloadThread(QThread):
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка загрузки аудио: {str(e)}", exc_info=True)
-            raise Exception(f"Ошибка загрузки аудио: {str(e)}")
-
+            logger.exception(f"Ошибка загрузки аудио")
+            raise
+            
     def progress_hook(self, d: Dict[str, Any]) -> None:
-        if self.is_cancelled:
+        if self.cancel_event.is_set():
             raise Exception("Загрузка отменена пользователем")
 
         if d.get('status') == 'downloading':
@@ -198,16 +235,84 @@ class DownloadThread(QThread):
                 total: float = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
                 if total:
                     percent: float = (downloaded / total) * 100
-                    self.progress.emit(f"Загрузка: {percent:.1f}%", percent)
+                    self.signals.progress.emit(f"Загрузка: {percent:.1f}%", percent)
+                else:
+                    # Если размер неизвестен, отправляем неопределенный прогресс
+                    self.signals.progress.emit("Загрузка...", -1)
             except Exception as e:
-                logger.error(f"Ошибка в progress_hook: {e}")
+                logger.exception("Ошибка в progress_hook")
         elif d.get('status') == 'finished':
             self.downloaded_filename = os.path.basename(d.get('filename', ''))
-            self.progress.emit("Обработка файла...", 100)
-
+            self.signals.progress.emit("Обработка файла...", 100)
+            
     def cancel(self) -> None:
-        self.is_cancelled = True
+        self.cancel_event.set()
+        logger.info(f"Запрошена отмена загрузки: {self.url}")
 
+# Функция для загрузки изображений для многократного использования
+def load_image(image_name: str, size: Tuple[int, int] = (100, 100)) -> Tuple[bool, Optional[QPixmap], str]:
+    """
+    Загружает изображение с проверкой различных расширений.
+    
+    Args:
+        image_name: Имя файла без расширения
+        size: Размер для масштабирования (ширина, высота)
+        
+    Returns:
+        Tuple из (успех загрузки, pixmap или None, путь к файлу)
+    """
+    # Изменяем порядок расширений, чтобы PNG был первым
+    extensions = [".png", ".jpeg", ".jpg", ".gif", ".ico"]
+    
+    for ext in extensions:
+        image_path = get_resource_path(f"{image_name}{ext}")
+        if os.path.exists(image_path):
+            try:
+                pixmap = QPixmap(image_path)
+                if not pixmap.isNull():
+                    # Масштабируем изображение до указанного размера
+                    scaled_pixmap = pixmap.scaled(size[0], size[1], Qt.AspectRatioMode.KeepAspectRatio, 
+                                             Qt.TransformationMode.SmoothTransformation)
+                    logger.info(f"Изображение успешно загружено: {image_path}")
+                    return True, scaled_pixmap, image_path
+                else:
+                    logger.warning(f"Изображение не удалось загрузить (пустой pixmap): {image_path}")
+            except Exception as e:
+                logger.exception(f"Ошибка при загрузке изображения {image_path}")
+    
+    logger.warning(f"Изображение {image_name} не найдено ни с одним из поддерживаемых расширений")
+    return False, None, ""
+
+# Функция специально для загрузки логотипа, которая всегда использует png
+def load_logo(size: Tuple[int, int] = (80, 80)) -> Tuple[bool, Optional[QPixmap], str]:
+    """
+    Загружает логотип в формате PNG.
+    
+    Args:
+        size: Размер для масштабирования (ширина, высота)
+        
+    Returns:
+        Tuple из (успех загрузки, pixmap или None, путь к файлу)
+    """
+    image_path = get_resource_path("vid1.png")
+    logger.info(f"Загрузка логотипа из: {image_path}")
+    
+    if os.path.exists(image_path):
+        try:
+            pixmap = QPixmap(image_path)
+            if not pixmap.isNull():
+                scaled_pixmap = pixmap.scaled(size[0], size[1], Qt.AspectRatioMode.KeepAspectRatio, 
+                                        Qt.TransformationMode.SmoothTransformation)
+                logger.info(f"Логотип успешно загружен: {image_path}")
+                return True, scaled_pixmap, image_path
+            else:
+                logger.warning(f"Логотип не удалось загрузить (пустой pixmap): {image_path}")
+        except Exception as e:
+            logger.exception(f"Ошибка при загрузке логотипа: {image_path}")
+    else:
+        logger.warning(f"Файл логотипа не найден: {image_path}")
+    
+    return False, None, ""
 
 class VideoDownloaderUI(QMainWindow):
     def __init__(self) -> None:
@@ -217,6 +322,10 @@ class VideoDownloaderUI(QMainWindow):
         
         # Установка иконки приложения
         self.setup_app_icon()
+        
+        # Инициализация пула потоков
+        self.thread_pool = QThreadPool()
+        logger.info(f"Максимальное количество потоков: {self.thread_pool.maxThreadCount()}")
         
         central_widget: QWidget = QWidget()
         self.setCentralWidget(central_widget)
@@ -322,51 +431,23 @@ class VideoDownloaderUI(QMainWindow):
         # Добавляем изображение с обработчиком события
         logo_layout = QHBoxLayout()
         self.logo_label = QLabel()
-        self.logo_label.setMinimumSize(64, 64)  # Устанавливаем минимальный размер для QLabel
+        self.logo_label.setMinimumSize(64, 64)
         
-        # Полный путь к изображению с использованием get_resource_path
-        image_path = get_resource_path("vid1.png")
-        logger.info(f"Попытка загрузить изображение из: {image_path}")
-        
-        # Проверяем существование файла
-        if not os.path.exists(image_path):
-            logger.error(f"Файл изображения не найден: {image_path}")
-            # Попробуем альтернативные расширения
-            alt_extensions = [".jpg", ".png", ".gif", ".ico"]
-            found = False
-            for ext in alt_extensions:
-                alt_path = get_resource_path(f"vid1{ext}")
-                if os.path.exists(alt_path):
-                    image_path = alt_path
-                    logger.info(f"Найден альтернативный файл изображения: {alt_path}")
-                    found = True
-                    break
-            
-            if not found:
-                # Устанавливаем текст вместо изображения
+        # Загружаем логотип с помощью специальной функции для PNG
+        success, pixmap, _ = load_logo((80, 80))
+        if success:
+            self.logo_label.setPixmap(pixmap)
+        else:
+            # Если не удалось загрузить PNG, явно проверяем другие расширения
+            success, pixmap, _ = load_image("vid1", (80, 80))
+            if success:
+                self.logo_label.setPixmap(pixmap)
+            else:
+                # Если изображение не найдено, показываем текст
                 self.logo_label.setText("О программе")
                 self.logo_label.setStyleSheet("color: blue; text-decoration: underline;")
         
-        # Пытаемся загрузить изображение, если файл существует
-        if os.path.exists(image_path):
-            try:
-                pixmap = QPixmap(image_path)
-                if not pixmap.isNull():
-                    # Увеличиваем размер для лучшей видимости
-                    logo_pixmap = pixmap.scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio, 
-                                             Qt.TransformationMode.SmoothTransformation)
-                    self.logo_label.setPixmap(logo_pixmap)
-                    logger.info(f"Изображение успешно загружено, размер: {pixmap.width()}x{pixmap.height()}")
-                else:
-                    logger.error(f"Изображение не удалось загрузить (пустой pixmap): {image_path}")
-                    self.logo_label.setText("О программе")
-                    self.logo_label.setStyleSheet("color: blue; text-decoration: underline;")
-            except Exception as e:
-                logger.error(f"Ошибка при загрузке изображения: {e}")
-                self.logo_label.setText("О программе")
-                self.logo_label.setStyleSheet("color: blue; text-decoration: underline;")
-        
-        # Устанавливаем курсор и подсказку в любом случае
+        # Устанавливаем курсор и подсказку
         self.logo_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.logo_label.setToolTip("Нажмите, чтобы увидеть информацию о программе")
         self.logo_label.mousePressEvent = self.show_about_dialog
@@ -439,7 +520,7 @@ class VideoDownloaderUI(QMainWindow):
         """)
 
         # Инициализация переменных
-        self.current_download: Optional[DownloadThread] = None
+        self.current_download: Optional[DownloadRunnable] = None
         self.download_queue: List[Dict[str, Any]] = []
         self.successful_downloads: List[tuple] = []
         self.failed_downloads: List[tuple] = []
@@ -466,33 +547,14 @@ class VideoDownloaderUI(QMainWindow):
         Устанавливает иконку приложения из файла изображения.
         Если файл не найден, используется стандартная иконка.
         """
-        # Используем функцию get_resource_path вместо обычного пути
-        image_path = get_resource_path("vid1.png")
-        logger.info(f"Попытка загрузить иконку из: {image_path}")
-        
-        # Проверяем альтернативные расширения, если основной файл не найден
-        if not os.path.exists(image_path):
-            alt_extensions = [".jpg", ".png", ".gif", ".ico"]
-            for ext in alt_extensions:
-                alt_path = get_resource_path(f"vid1{ext}")
-                if os.path.exists(alt_path):
-                    image_path = alt_path
-                    logger.info(f"Найден альтернативный файл иконки: {alt_path}")
-                    break
-        
-        if os.path.exists(image_path):
-            try:
-                # Создаем иконку из изображения
-                app_icon = QIcon(image_path)
-                if not app_icon.isNull():
-                    self.setWindowIcon(app_icon)
-                    logger.info(f"Установлена иконка приложения из: {image_path}")
-                else:
-                    logger.warning("Не удалось создать иконку из изображения (null icon)")
-            except Exception as e:
-                logger.error(f"Ошибка при установке иконки приложения: {e}")
+        # Используем функцию для загрузки логотипа в формате PNG
+        success, pixmap, image_path = load_logo((32, 32))
+        if success:
+            app_icon = QIcon(pixmap)
+            self.setWindowIcon(app_icon)
+            logger.info(f"Установлена иконка приложения из: {image_path}")
         else:
-            logger.warning("Файл изображения для иконки приложения не найден")
+            logger.warning("Файл логотипа для иконки приложения не найден")
 
     def load_settings(self) -> Dict[str, Any]:
         try:
@@ -646,20 +708,36 @@ class VideoDownloaderUI(QMainWindow):
         download: Dict[str, Any] = self.download_queue[0]
         logger.info(f"Начало загрузки: {download['url']}, режим: {download['mode']}")
 
-        self.current_download = DownloadThread(
+        # Используем DownloadRunnable вместо DownloadThread с ThreadPool
+        download_runnable = DownloadRunnable(
             download['url'],
             download['mode'],
             download['resolution']
         )
-        self.current_download.progress.connect(self.update_progress)
-        self.current_download.finished.connect(self.on_download_finished)
+        
+        # Подключаем сигналы
+        download_runnable.signals.progress.connect(self.update_progress)
+        download_runnable.signals.finished.connect(self.on_download_finished)
+        
+        # Сохраняем ссылку на текущую загрузку
+        self.current_download = download_runnable
         self.update_queue_display()
-        self.current_download.start()
+        
+        # Запускаем загрузку в пуле потоков
+        self.thread_pool.start(download_runnable)
 
     def update_progress(self, status: str, percent: float) -> None:
         self.status_label.setText(status)
-        self.progress_bar.setValue(int(percent))
-        QApplication.processEvents()
+        if percent >= 0:
+            self.progress_bar.setValue(int(percent))
+        else:
+            # Если процент отрицательный, показываем неопределенный прогресс
+            self.progress_bar.setRange(0, 0)
+        # Уменьшаем частоту вызовов processEvents, чтобы не нарушать основной цикл событий
+        # Вызываем только раз в 5 обновлений
+        self.progress_update_counter = getattr(self, 'progress_update_counter', 0) + 1
+        if self.progress_update_counter % 5 == 0:
+            QApplication.processEvents()
 
     def on_download_finished(self, success: bool, message: str, filename: str) -> None:
         if success:
@@ -730,12 +808,14 @@ class VideoDownloaderUI(QMainWindow):
 
     def cancel_download(self) -> None:
         if self.current_download:
+            logger.info("Отмена текущей загрузки...")
             self.current_download.cancel()
-            self.current_download = None
-            self.status_label.setText("Загрузка отменена")
+            self.status_label.setText("Загрузка отменяется...")
             self.status_label.setStyleSheet("color: orange;")
+            # При отмене загрузки сбрасываем индикатор прогресса
             self.progress_bar.setValue(0)
-            self.set_controls_enabled(True)
+            # Восстанавливаем нормальный режим прогресс-бара, если он был в режиме ожидания
+            self.progress_bar.setRange(0, 100)
 
     def on_mode_changed(self) -> None:
         is_video: bool = self.video_radio.isChecked()
@@ -778,36 +858,14 @@ class VideoDownloaderUI(QMainWindow):
         if not url.startswith(('http://', 'https://')):
             return False, "URL должен начинаться с http:// или https://"
 
-        patterns: Dict[str, List[str]] = {
-            'YouTube': [
-                r'^https?://(?:www\.)?youtube\.com/watch\?v=[\w-]{11}(?:&\S*)?$',
-                r'^https?://youtu\.be/[\w-]{11}(?:\?\S*)?$',
-                r'^https?://(?:www\.)?youtube\.com/shorts/[\w-]{11}(?:\?\S*)?$',
-                r'^https?://(?:www\.)?youtube\.com/embed/[\w-]{11}(?:\?\S*)?$'
-            ],
-            'VK': [
-                r'^https?://(?:www\.)?vk\.com/video-?\d+_\d+(?:\?\S*)?$',
-                r'^https?://(?:www\.)?vkvideo\.ru/video-?\d+_\d+(?:\?\S*)?$'
-            ],
-            'RuTube': [
-                r'^https?://(?:www\.)?rutube\.ru/video/[\w-]{32}/?(?:\?\S*)?$',
-                r'^https?://(?:www\.)?rutube\.ru/play/embed/[\w-]{32}/?(?:\?\S*)?$'
-            ],
-            'Одноклассники': [
-                r'^https?://(?:www\.)?ok\.ru/video/\d+(?:\?\S*)?$'
-            ],
-            'Mail.ru': [
-                r'^https?://(?:www\.)?my\.mail\.ru/(?:[\w/]+/)?video/(?:[\w/]+/)\d+\.html(?:\?\S*)?$'
-            ]
-        }
-
-        for service, service_patterns in patterns.items():
+        # Используем глобальный словарь URL_PATTERNS вместо создания его каждый раз
+        for service, service_patterns in URL_PATTERNS.items():
             for pattern in service_patterns:
                 if re.match(pattern, url):
                     logger.info(f"URL валиден для сервиса {service}: {url}")
                     return True, ""
 
-        for service_name in patterns.keys():
+        for service_name in URL_PATTERNS.keys():
             if service_name.lower() in url.lower():
                 return False, f"Неверный формат URL для {service_name}. Проверьте правильность ссылки."
 
@@ -826,27 +884,15 @@ class VideoDownloaderUI(QMainWindow):
         """
         Показывает диалоговое окно с информацией о программе.
         """
-        # Ищем изображение для окна О программе с использованием get_resource_path
-        image_path = get_resource_path("vid1.png")
-        has_image = os.path.exists(image_path)
+        # Используем специальную функцию загрузки логотипа в формате PNG
+        success, _, image_path = load_logo((120, 120))
         
-        # Если основное изображение не найдено, ищем альтернативные
-        if not has_image:
-            alt_extensions = [".jpg", ".png", ".gif", ".ico"]
-            for ext in alt_extensions:
-                alt_path = get_resource_path(f"vid1{ext}")
-                if os.path.exists(alt_path):
-                    image_path = alt_path
-                    has_image = True
-                    logger.info(f"Найден альтернативный файл изображения для диалога: {alt_path}")
-                    break
-                
         # Создаем текст с HTML-форматированием
-        if has_image:
+        if success:
             # Если изображение найдено, включаем его в HTML с указанием пути
             about_text = (
                 f"<div style='text-align: center;'><img src='{image_path}' width='120' height='120'/></div>"
-                "<h2 style='text-align: center;'>Video Downloader v1.06</h2>"
+                "<h2 style='text-align: center;'>Video Downloader v1.07</h2>"
                 "<p>Приложение для скачивания видео и аудио с различных видеохостингов:</p>"
                 "<ul>"
                 "<li>YouTube</li>"
@@ -863,7 +909,7 @@ class VideoDownloaderUI(QMainWindow):
             # Если изображение не найдено, показываем восклицательный знак
             about_text = (
                 "<div style='text-align: center;'><span style='font-size: 80px; color: red;'>!</span></div>"
-                "<h2 style='text-align: center;'>Video Downloader v1.06</h2>"
+                "<h2 style='text-align: center;'>Video Downloader v1.07</h2>"
                 "<p>Приложение для скачивания видео и аудио с различных видеохостингов:</p>"
                 "<ul>"
                 "<li>YouTube</li>"
@@ -885,7 +931,7 @@ class VideoDownloaderUI(QMainWindow):
         msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
         
         # Устанавливаем иконку, если нужно информационное изображение
-        if not has_image:
+        if not success:
             msg_box.setIcon(QMessageBox.Icon.Information)
         
         msg_box.exec()
@@ -930,20 +976,12 @@ if __name__ == '__main__':
     
     app = QApplication(sys.argv)
     
-    # Установка иконки для всего приложения с использованием get_resource_path
-    image_path = get_resource_path("vid1.png")
-    if not os.path.exists(image_path):
-        # Проверяем альтернативные форматы
-        alt_extensions = [".jpg", ".png", ".gif", ".ico"]
-        for ext in alt_extensions:
-            alt_path = get_resource_path(f"vid1{ext}")
-            if os.path.exists(alt_path):
-                image_path = alt_path
-                break
-                
-    if os.path.exists(image_path):
-        app_icon = QIcon(image_path)
+    # Установка иконки для всего приложения с использованием load_logo
+    success, pixmap, _ = load_logo((32, 32))
+    if success:
+        app_icon = QIcon(pixmap)
         app.setWindowIcon(app_icon)
+        logger.info("Установлена иконка приложения для QApplication")
     
     window = VideoDownloaderUI()
     window.show()
