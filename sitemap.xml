@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
@@ -6,4 +7,13 @@
         <priority>1.0</priority>
         <changefreq>monthly</changefreq>
     </url>
+=======
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>https://maks-mk.github.io/video_dloader/</loc>
+        <lastmod>2025-02-26</lastmod>
+        <priority>0.8</priority>
+    </url>
+>>>>>>> 31bdd5c9ef86b84b01d449da734af52141754560
 </urlset> 

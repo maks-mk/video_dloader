@@ -1,3 +1,9 @@
+<<<<<<< HEAD
 User-agent: *
 Allow: /
 Sitemap: https://maks-mk.github.io/sitemap.xml 
+=======
+User-agent: *
+Allow: /
+Sitemap: https://maks-mk.github.io/video_dloader/sitemap.xml 
+>>>>>>> 31bdd5c9ef86b84b01d449da734af52141754560
