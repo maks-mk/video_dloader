@@ -8,13 +8,6 @@ from typing import Tuple, List, Dict, Any, Optional, Set
 import subprocess
 import shutil
 import threading
-from enum import Enum
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-import time
-from abc import ABC, abstractmethod
-from logging.handlers import RotatingFileHandler
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -38,18 +31,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('VideoDownloader')
-
-def setup_logging():
-    log_handler = RotatingFileHandler(
-        filename=log_file,
-        maxBytes=5*1024*1024,  # 5MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    log_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(funcName)s(%(lineno)d): %(message)s'
-    ))
-    logger.addHandler(log_handler)
 
 # Функция для получения пути к ресурсам, корректно работающая с PyInstaller
 def get_resource_path(relative_path: str) -> str:
@@ -104,10 +85,6 @@ URL_PATTERNS = {
         r'^https?://(?:www\.)?my\.mail\.ru/(?:[\w/]+/)?video/(?:[\w/]+/)\d+\.html(?:\?\S*)?$'
     ]
 }
-
-class DownloadMode(Enum):
-    VIDEO = "video"
-    AUDIO = "audio"
 
 class ResolutionWorker(QThread):
     resolutions_found = pyqtSignal(list)
@@ -337,77 +314,6 @@ def load_logo(size: Tuple[int, int] = (80, 80)) -> Tuple[bool, Optional[QPixmap]
     
     return False, None, ""
 
-class VideoDownloaderError(Exception):
-    """Базовое исключение для приложения"""
-    pass
-
-class URLValidationError(VideoDownloaderError):
-    """Ошибка валидации URL"""
-    pass
-
-class DownloadError(VideoDownloaderError):
-    """Ошибка загрузки"""
-    pass
-
-class ThemeManager:
-    @staticmethod
-    def get_dark_theme() -> str:
-        return """
-            QMainWindow { 
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QFrame { 
-                background-color: #333333;
-                border-radius: 10px;
-                padding: 20px;
-            }
-            QPushButton {
-                background-color: #0d47a1;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { 
-                background-color: #1565c0;
-            }
-        """
-
-    @staticmethod
-    def get_light_theme() -> str:
-        return """
-            QMainWindow { 
-                background-color: rgb(208, 203, 223);
-            }
-            QFrame { 
-                background-color: rgb(245, 242, 231);
-                border-radius: 10px;
-                padding: 20px;
-            }
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { 
-                background-color: #1976D2;
-            }
-            QLineEdit {
-                padding: 8px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            QProgressBar {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                text-align: center;
-            }
-            QProgressBar::chunk { background-color: #4CAF50; }
-        """
-
 class VideoDownloaderUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -589,7 +495,29 @@ class VideoDownloaderUI(QMainWindow):
         main_layout.addWidget(right_panel, 1)
 
         # Стилизация приложения
-        self.setStyleSheet(ThemeManager.get_light_theme())
+        self.setStyleSheet("""
+            QMainWindow { background-color:rgb(208, 203, 223); }
+            QFrame { background-color: rgb(245, 242, 231); border-radius: 10px; padding: 20px; }
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #1976D2; }
+            QLineEdit {
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            QProgressBar {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                text-align: center;
+            }
+            QProgressBar::chunk { background-color: #4CAF50; }
+        """)
 
         # Инициализация переменных
         self.current_download: Optional[DownloadRunnable] = None
@@ -924,27 +852,24 @@ class VideoDownloaderUI(QMainWindow):
         Проверяет валидность URL для поддерживаемых видеосервисов.
         Возвращает кортеж (валидность, сообщение об ошибке).
         """
-        try:
-            if not url:
-                raise URLValidationError("URL не может быть пустым")
+        if not url:
+            return False, "URL не может быть пустым"
 
-            if not url.startswith(('http://', 'https://')):
-                raise URLValidationError("URL должен начинаться с http:// или https://")
+        if not url.startswith(('http://', 'https://')):
+            return False, "URL должен начинаться с http:// или https://"
 
-            # Используем глобальный словарь URL_PATTERNS вместо создания его каждый раз
-            for service, service_patterns in URL_PATTERNS.items():
-                for pattern in service_patterns:
-                    if re.match(pattern, url):
-                        logger.info(f"URL валиден для сервиса {service}: {url}")
-                        return True, ""
+        # Используем глобальный словарь URL_PATTERNS вместо создания его каждый раз
+        for service, service_patterns in URL_PATTERNS.items():
+            for pattern in service_patterns:
+                if re.match(pattern, url):
+                    logger.info(f"URL валиден для сервиса {service}: {url}")
+                    return True, ""
 
-            for service_name in URL_PATTERNS.keys():
-                if service_name.lower() in url.lower():
-                    raise URLValidationError(f"Неверный формат URL для {service_name}. Проверьте правильность ссылки.")
+        for service_name in URL_PATTERNS.keys():
+            if service_name.lower() in url.lower():
+                return False, f"Неверный формат URL для {service_name}. Проверьте правильность ссылки."
 
-            return False, "Неподдерживаемый видеосервис или неверный формат URL"
-        except URLValidationError as e:
-            return False, str(e)
+        return False, "Неподдерживаемый видеосервис или неверный формат URL"
 
     def set_controls_enabled(self, enabled: bool) -> None:
         """
@@ -976,7 +901,6 @@ class VideoDownloaderUI(QMainWindow):
                 "<li>Одноклассники</li>"
                 "<li>Mail.ru</li>"
                 "</ul>"
-                "<p><b>Сайт программы:</b> <a href='https://maks-mk.github.io/'>https://maks-mk.github.io/</a></p>"
                 "<p><b>Разработчик:</b> <a href='mailto:maks_k77@mail.ru'>maks_k77@mail.ru</a></p>"
                 "<p><b>Поддержать проект:</b> Т-Банк 2200 7001 2147 7888</p>"
                 "<p>© 2024-2025 Все права защищены</p>"
@@ -994,7 +918,6 @@ class VideoDownloaderUI(QMainWindow):
                 "<li>Одноклассники</li>"
                 "<li>Mail.ru</li>"
                 "</ul>"
-                "<p><b>Сайт программы:</b> <a href='https://maks-mk.github.io/'>https://maks-mk.github.io/</a></p>"
                 "<p><b>Разработчик:</b> <a href='mailto:maks_k77@mail.ru'>maks_k77@mail.ru</a></p>"
                 "<p><b>Поддержать проект:</b> Т-Банк 2200 7001 2147 7888</p>"
                 "<p>© 2024-2025 Все права защищены</p>"
@@ -1063,73 +986,3 @@ if __name__ == '__main__':
     window = VideoDownloaderUI()
     window.show()
     sys.exit(app.exec())
-
-class DownloadQueue:
-    def __init__(self):
-        self.queue: List[Dict[str, Any]] = []
-        self.executor = ThreadPoolExecutor(max_workers=3)
-        
-    async def process_queue(self):
-        while self.queue:
-            download = self.queue[0]
-            try:
-                await self.process_download(download)
-            except Exception as e:
-                logger.exception(f"Error processing download: {e}")
-            self.queue.pop(0)
-            
-    async def process_download(self, download: Dict[str, Any]):
-        # Асинхронная обработка загрузки
-        pass
-
-class ResolutionCache:
-    def __init__(self, ttl: int = 3600):  # TTL в секундах
-        self.cache: Dict[str, Tuple[List[str], float]] = {}
-        self.ttl = ttl
-        
-    def get(self, url: str) -> Optional[List[str]]:
-        if url in self.cache:
-            resolutions, timestamp = self.cache[url]
-            if time.time() - timestamp < self.ttl:
-                return resolutions
-            del self.cache[url]
-        return None
-        
-    def set(self, url: str, resolutions: List[str]) -> None:
-        self.cache[url] = (resolutions, time.time())
-
-class VideoServicePlugin(ABC):
-    @abstractmethod
-    def can_handle(self, url: str) -> bool:
-        pass
-        
-    @abstractmethod
-    def get_video_info(self, url: str) -> Dict[str, Any]:
-        pass
-        
-    @abstractmethod
-    def download(self, url: str, options: Dict[str, Any]) -> bool:
-        pass
-
-class YouTubePlugin(VideoServicePlugin):
-    def can_handle(self, url: str) -> bool:
-        return 'youtube.com' in url or 'youtu.be' in url
-    
-    # Реализация остальных методов
-
-class DownloadMetrics:
-    def __init__(self):
-        self.total_downloads: int = 0
-        self.successful_downloads: int = 0
-        self.failed_downloads: int = 0
-        self.total_bytes_downloaded: int = 0
-        self.average_speed: float = 0.0
-        
-    def update_metrics(self, success: bool, bytes_downloaded: int, speed: float) -> None:
-        self.total_downloads += 1
-        if success:
-            self.successful_downloads += 1
-        else:
-            self.failed_downloads += 1
-        self.total_bytes_downloaded += bytes_downloaded
-        self.average_speed = (self.average_speed + speed) / 2
