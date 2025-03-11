@@ -65,45 +65,85 @@ def get_resource_path(relative_path: str) -> str:
         logger.error(f"Ошибка при определении пути ресурса {relative_path}: {e}")
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
-def get_service_name(url: str) -> str:
-    """
-    Определяет название видеосервиса по URL.
-    """
-    if 'youtube.com' in url or 'youtu.be' in url:
-        return 'YouTube'
-    elif 'vk.com' in url or 'vkvideo.ru' in url:
-        return 'VK'
-    elif 'rutube.ru' in url:
-        return 'RuTube'
-    elif 'ok.ru' in url:
-        return 'Одноклассники'
-    elif 'mail.ru' in url:
-        return 'Mail.ru'
-    return 'Неизвестный сервис'
+class VideoURL:
+    """Класс для работы с URL видео и определения сервиса."""
+    
+    # Константы с паттернами URL для разных сервисов
+    URL_PATTERNS = {
+        'YouTube': [
+            r'^https?://(?:www\.)?youtube\.com/watch\?v=[\w-]{11}(?:&\S*)?$',
+            r'^https?://youtu\.be/[\w-]{11}(?:\?\S*)?$',
+            r'^https?://(?:www\.)?youtube\.com/shorts/[\w-]{11}(?:\?\S*)?$',
+            r'^https?://(?:www\.)?youtube\.com/embed/[\w-]{11}(?:\?\S*)?$'
+        ],
+        'VK': [
+            r'^https?://(?:www\.)?vk\.com/video-?\d+_\d+(?:\?\S*)?$',
+            r'^https?://(?:www\.)?vkvideo\.ru/video-?\d+_\d+(?:\?\S*)?$'
+        ],
+        'RuTube': [
+            r'^https?://(?:www\.)?rutube\.ru/video/[\w-]{32}/?(?:\?\S*)?$',
+            r'^https?://(?:www\.)?rutube\.ru/play/embed/[\w-]{32}/?(?:\?\S*)?$'
+        ],
+        'Одноклассники': [
+            r'^https?://(?:www\.)?ok\.ru/video/\d+(?:\?\S*)?$'
+        ],
+        'Mail.ru': [
+            r'^https?://(?:www\.)?my\.mail\.ru/(?:[\w/]+/)?video/(?:[\w/]+/)\d+\.html(?:\?\S*)?$'
+        ]
+    }
 
-# Константы с паттернами URL для разных сервисов
-URL_PATTERNS = {
-    'YouTube': [
-        r'^https?://(?:www\.)?youtube\.com/watch\?v=[\w-]{11}(?:&\S*)?$',
-        r'^https?://youtu\.be/[\w-]{11}(?:\?\S*)?$',
-        r'^https?://(?:www\.)?youtube\.com/shorts/[\w-]{11}(?:\?\S*)?$',
-        r'^https?://(?:www\.)?youtube\.com/embed/[\w-]{11}(?:\?\S*)?$'
-    ],
-    'VK': [
-        r'^https?://(?:www\.)?vk\.com/video-?\d+_\d+(?:\?\S*)?$',
-        r'^https?://(?:www\.)?vkvideo\.ru/video-?\d+_\d+(?:\?\S*)?$'
-    ],
-    'RuTube': [
-        r'^https?://(?:www\.)?rutube\.ru/video/[\w-]{32}/?(?:\?\S*)?$',
-        r'^https?://(?:www\.)?rutube\.ru/play/embed/[\w-]{32}/?(?:\?\S*)?$'
-    ],
-    'Одноклассники': [
-        r'^https?://(?:www\.)?ok\.ru/video/\d+(?:\?\S*)?$'
-    ],
-    'Mail.ru': [
-        r'^https?://(?:www\.)?my\.mail\.ru/(?:[\w/]+/)?video/(?:[\w/]+/)\d+\.html(?:\?\S*)?$'
-    ]
-}
+    @classmethod
+    def get_service_name(cls, url: str) -> str:
+        """Определяет название видеосервиса по URL."""
+        if not url:
+            return 'Неизвестный сервис'
+            
+        for service, patterns in cls.URL_PATTERNS.items():
+            for pattern in patterns:
+                if re.match(pattern, url):
+                    return service
+                    
+        # Проверка по доменам, если точное совпадение не найдено
+        if 'youtube.com' in url or 'youtu.be' in url:
+            return 'YouTube'
+        elif 'vk.com' in url or 'vkvideo.ru' in url:
+            return 'VK'
+        elif 'rutube.ru' in url:
+            return 'RuTube'
+        elif 'ok.ru' in url:
+            return 'Одноклассники'
+        elif 'mail.ru' in url:
+            return 'Mail.ru'
+            
+        return 'Неизвестный сервис'
+
+    @classmethod
+    def is_valid(cls, url: str) -> Tuple[bool, str]:
+        """
+        Проверяет валидность URL для поддерживаемых видеосервисов.
+        Возвращает кортеж (валидность, сообщение об ошибке).
+        """
+        try:
+            if not url:
+                raise URLValidationError("URL не может быть пустым")
+
+            if not url.startswith(('http://', 'https://')):
+                raise URLValidationError("URL должен начинаться с http:// или https://")
+
+            for service, patterns in cls.URL_PATTERNS.items():
+                for pattern in patterns:
+                    if re.match(pattern, url):
+                        logger.info(f"URL валиден для сервиса {service}: {url}")
+                        return True, ""
+
+            # Если URL содержит домен известного сервиса, но не соответствует паттерну
+            service = cls.get_service_name(url)
+            if service != 'Неизвестный сервис':
+                raise URLValidationError(f"Неверный формат URL для {service}. Проверьте правильность ссылки.")
+
+            return False, "Неподдерживаемый видеосервис или неверный формат URL"
+        except URLValidationError as e:
+            return False, str(e)
 
 class DownloadMode(Enum):
     VIDEO = "video"
@@ -198,7 +238,7 @@ class DownloadRunnable(QRunnable):
             if not self.resolution:
                 raise Exception("Не указано разрешение для видео")
             resolution_number: str = self.resolution.replace('p', '')
-            service: str = get_service_name(self.url)
+            service: str = VideoURL.get_service_name(self.url)
             logger.info(f"Загрузка видео с {service} в разрешении {resolution_number}p")
 
             ydl_opts: Dict[str, Any] = {
@@ -306,16 +346,16 @@ def load_image(image_name: str, size: Tuple[int, int] = (100, 100)) -> Tuple[boo
     logger.warning(f"Изображение {image_name} не найдено ни с одним из поддерживаемых расширений")
     return False, None, ""
 
-# Функция специально для загрузки логотипа, которая всегда использует png
-def load_logo(size: Tuple[int, int] = (80, 80)) -> Tuple[bool, Optional[QPixmap], str]:
+def load_app_logo(size: Tuple[int, int] = (80, 80), for_app_icon: bool = False) -> Tuple[bool, Optional[QPixmap], str]:
     """
-    Загружает логотип в формате PNG.
+    Загружает логотип приложения с указанным размером.
     
     Args:
-        size: Размер для масштабирования (ширина, высота)
+        size: Кортеж (ширина, высота) для масштабирования
+        for_app_icon: Если True, загружает версию для иконки приложения
         
     Returns:
-        Tuple из (успех загрузки, pixmap или None, путь к файлу)
+        Tuple[bool, Optional[QPixmap], str]: (успех загрузки, pixmap или None, путь к файлу)
     """
     image_path = get_resource_path("vid1.png")
     logger.info(f"Загрузка логотипа из: {image_path}")
@@ -324,8 +364,9 @@ def load_logo(size: Tuple[int, int] = (80, 80)) -> Tuple[bool, Optional[QPixmap]
         try:
             pixmap = QPixmap(image_path)
             if not pixmap.isNull():
-                scaled_pixmap = pixmap.scaled(size[0], size[1], Qt.AspectRatioMode.KeepAspectRatio, 
-                                        Qt.TransformationMode.SmoothTransformation)
+                scaled_pixmap = pixmap.scaled(size[0], size[1], 
+                                            Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
                 logger.info(f"Логотип успешно загружен: {image_path}")
                 return True, scaled_pixmap, image_path
             else:
@@ -407,6 +448,136 @@ class ThemeManager:
             }
             QProgressBar::chunk { background-color: #4CAF50; }
         """
+
+class DownloadManager:
+    """Класс для управления загрузками видео и аудио."""
+    
+    def __init__(self, output_dir: str = 'downloads'):
+        self.output_dir = output_dir
+        self.download_queue: List[Dict[str, Any]] = []
+        self.current_download: Optional[DownloadRunnable] = None
+        self.successful_downloads: List[tuple] = []
+        self.failed_downloads: List[tuple] = []
+        os.makedirs(output_dir, exist_ok=True)
+
+    def add_to_queue(self, url: str, mode: str, resolution: Optional[str] = None) -> bool:
+        """Добавляет новую загрузку в очередь."""
+        is_valid, error_message = VideoURL.is_valid(url)
+        if not is_valid:
+            logger.warning(f"Некорректный URL: {url}. Причина: {error_message}")
+            return False
+
+        service: str = VideoURL.get_service_name(url)
+        self.download_queue.append({
+            'url': url,
+            'mode': mode,
+            'resolution': resolution,
+            'service': service
+        })
+        logger.info(f"Добавлено в очередь: {url}, сервис: {service}, режим: {mode}")
+        return True
+
+    def start_downloads(self) -> None:
+        """Запускает процесс загрузки."""
+        if not self.download_queue:
+            logger.info("Очередь загрузок пуста")
+            return
+        
+        if self.current_download is None:
+            logger.info("Запуск очереди загрузок")
+            self.process_queue()
+
+    def process_queue(self) -> None:
+        """Обрабатывает следующий элемент в очереди."""
+        if not self.download_queue:
+            logger.info("Очередь загрузок завершена")
+            return
+
+        download = self.download_queue[0]
+        logger.info(f"Начало загрузки: {download['url']}, режим: {download['mode']}")
+
+        download_runnable = DownloadRunnable(
+            download['url'],
+            download['mode'],
+            download['resolution'],
+            self.output_dir
+        )
+        # Устанавливаем текущую загрузку до возврата объекта
+        self.current_download = download_runnable
+        logger.info("Установлена текущая загрузка")
+        return download_runnable
+
+    def cancel_current_download(self) -> None:
+        """Отменяет текущую загрузку."""
+        if self.current_download:
+            logger.info("Отмена текущей загрузки...")
+            self.current_download.cancel()
+
+    def on_download_finished(self, success: bool, message: str, filename: str) -> None:
+        """Обработчик завершения загрузки."""
+        if success:
+            logger.info(f"Загрузка завершена успешно: {message}")
+            if self.current_download and filename:
+                self.successful_downloads.append((filename, self.current_download.url))
+        else:
+            logger.error(f"Ошибка загрузки: {message}")
+            if self.current_download:
+                self.failed_downloads.append((self.current_download.url, message))
+
+        if self.download_queue:
+            self.download_queue.pop(0)
+
+        self.current_download = None
+
+    def clear_queue(self) -> None:
+        """Очищает очередь загрузок."""
+        self.download_queue.clear()
+        logger.info("Очередь загрузок очищена")
+
+    def remove_from_queue(self, index: int) -> None:
+        """Удаляет элемент из очереди по индексу."""
+        if 0 <= index < len(self.download_queue):
+            del self.download_queue[index]
+            logger.info(f"Элемент {index} удален из очереди")
+
+    def get_download_summary(self) -> str:
+        """Возвращает сводку о загрузках."""
+        if not self.successful_downloads and not self.failed_downloads:
+            return ""
+
+        message = "Результаты загрузки:\n\n"
+        if self.successful_downloads:
+            message += "Успешно загружены:\n"
+            for filename, url in self.successful_downloads:
+                # Определяем правильное расширение на основе имени файла
+                if '_audio' in filename:
+                    # Для аудио всегда будет mp3
+                    display_filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                else:
+                    # Для видео всегда будет mp4
+                    display_filename = filename.replace('.webm', '.mp4').replace('.mkv', '.mp4')
+                message += f"✓ {display_filename}\n"
+        if self.failed_downloads:
+            message += "\nНе удалось загрузить:\n"
+            for url, error in self.failed_downloads:
+                short_url = url if len(url) <= 50 else url[:50] + "..."
+                message += f"✗ {short_url}\n   Причина: {error}\n"
+        return message
+
+    def cleanup_temp_files(self) -> None:
+        """Очищает временные файлы в папке загрузок."""
+        try:
+            if os.path.exists(self.output_dir):
+                for file in os.listdir(self.output_dir):
+                    if file.endswith(('.part', '.ytdl')):
+                        full_path = os.path.join(self.output_dir, file)
+                        try:
+                            os.remove(full_path)
+                            logger.info(f"Удалён временный файл: {full_path}")
+                        except Exception as e:
+                            logger.error(f"Ошибка при удалении файла {full_path}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке временных файлов: {e}")
 
 class VideoDownloaderUI(QMainWindow):
     def __init__(self) -> None:
@@ -528,7 +699,7 @@ class VideoDownloaderUI(QMainWindow):
         self.logo_label.setMinimumSize(64, 64)
         
         # Загружаем логотип с помощью специальной функции для PNG
-        success, pixmap, _ = load_logo((80, 80))
+        success, pixmap, _ = load_app_logo((80, 80))
         if success:
             self.logo_label.setPixmap(pixmap)
         else:
@@ -592,10 +763,7 @@ class VideoDownloaderUI(QMainWindow):
         self.setStyleSheet(ThemeManager.get_light_theme())
 
         # Инициализация переменных
-        self.current_download: Optional[DownloadRunnable] = None
-        self.download_queue: List[Dict[str, Any]] = []
-        self.successful_downloads: List[tuple] = []
-        self.failed_downloads: List[tuple] = []
+        self.download_manager = DownloadManager()
         self.settings: Dict[str, Any] = self.load_settings()
 
         # Подключение сигналов
@@ -615,12 +783,8 @@ class VideoDownloaderUI(QMainWindow):
         self.apply_settings()
 
     def setup_app_icon(self) -> None:
-        """
-        Устанавливает иконку приложения из файла изображения.
-        Если файл не найден, используется стандартная иконка.
-        """
-        # Используем функцию для загрузки логотипа в формате PNG
-        success, pixmap, image_path = load_logo((32, 32))
+        """Устанавливает иконку приложения."""
+        success, pixmap, image_path = load_app_logo((32, 32), True)
         if success:
             app_icon = QIcon(pixmap)
             self.setWindowIcon(app_icon)
@@ -667,7 +831,7 @@ class VideoDownloaderUI(QMainWindow):
         clipboard = QApplication.clipboard()
         url: str = clipboard.text().strip()
 
-        is_valid, error_message = self.is_valid_video_url(url)
+        is_valid, error_message = VideoURL.is_valid(url)
         if not is_valid:
             logger.warning(f"Попытка вставить некорректный URL: {url}. Причина: {error_message}")
             QMessageBox.warning(self, "Ошибка", error_message)
@@ -720,83 +884,43 @@ class VideoDownloaderUI(QMainWindow):
 
     def add_to_queue(self) -> None:
         url: str = self.url_input.text().strip()
-        is_valid, error_message = self.is_valid_video_url(url)
-
-        if not is_valid:
-            logger.warning(f"Некорректный URL: {url}. Причина: {error_message}")
-            QMessageBox.warning(self, "Ошибка", error_message)
-            return
-
         mode: str = "video" if self.video_radio.isChecked() else "audio"
         resolution: Optional[str] = self.resolution_combo.currentText() if mode == "video" else None
-        service: str = get_service_name(url)
-        logger.info(f"Добавление в очередь: {url}, сервис: {service}, режим: {mode}")
 
-        self.download_queue.append({
-            'url': url,
-            'mode': mode,
-            'resolution': resolution,
-            'service': service
-        })
-        self.update_queue_display()
-        self.url_input.clear()
-        self.save_settings()
+        if self.download_manager.add_to_queue(url, mode, resolution):
+            self.update_queue_display()
+            self.url_input.clear()
+            self.save_settings()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Некорректный URL")
 
     def update_queue_display(self) -> None:
         self.queue_list.clear()
-        for i, item in enumerate(self.download_queue, 1):
-            mode_text: str = f"видео ({item['resolution']})" if item['mode'] == "video" else "аудио"
-            if (self.current_download and
-                self.current_download.url == item['url'] and
-                self.current_download.mode == item['mode'] and
-                (self.current_download.mode == 'audio' or
-                 self.current_download.resolution == item['resolution'])):
-                prefix: str = "⌛"
-            else:
-                prefix = " "
+        for i, item in enumerate(self.download_manager.download_queue, 1):
+            mode_text = f"видео ({item['resolution']})" if item['mode'] == "video" else "аудио"
+            # Проверяем, является ли текущий элемент активной загрузкой
+            is_current = (
+                self.download_manager.current_download is not None and
+                i == 1  # Первый элемент в очереди всегда является текущей загрузкой
+            )
+            prefix = "⌛" if is_current else " "
             self.queue_list.addItem(
                 f"{prefix} {i}. [{item.get('service', 'Неизвестный сервис')}] {item['url']} - {mode_text}"
             )
 
     def start_downloads(self) -> None:
-        if not self.download_queue:
+        if not self.download_manager.download_queue:
             QMessageBox.information(self, "Информация", "Очередь загрузок пуста")
             return
-        # Отключаем кнопки добавления и старта, чтобы предотвратить повторные нажатия
+
         self.set_controls_enabled(False)
-        if self.current_download is None:
-            logger.info("Запуск очереди загрузок")
-            self.process_queue()
-
-    def process_queue(self) -> None:
-        if not self.download_queue:
-            self.status_label.setText("Все загрузки завершены")
-            self.status_label.setStyleSheet("color: green;")
-            self.progress_bar.setValue(0)
-            logger.info("Очередь загрузок завершена")
-            self.set_controls_enabled(True)
-            return
-
-        download: Dict[str, Any] = self.download_queue[0]
-        logger.info(f"Начало загрузки: {download['url']}, режим: {download['mode']}")
-
-        # Используем DownloadRunnable вместо DownloadThread с ThreadPool
-        download_runnable = DownloadRunnable(
-            download['url'],
-            download['mode'],
-            download['resolution']
-        )
-        
-        # Подключаем сигналы
-        download_runnable.signals.progress.connect(self.update_progress)
-        download_runnable.signals.finished.connect(self.on_download_finished)
-        
-        # Сохраняем ссылку на текущую загрузку
-        self.current_download = download_runnable
-        self.update_queue_display()
-        
-        # Запускаем загрузку в пуле потоков
-        self.thread_pool.start(download_runnable)
+        download_runnable = self.download_manager.process_queue()
+        if download_runnable:
+            download_runnable.signals.progress.connect(self.update_progress)
+            download_runnable.signals.finished.connect(self.on_download_finished)
+            self.thread_pool.start(download_runnable)
+            # Обновляем отображение очереди сразу после запуска загрузки
+            self.update_queue_display()
 
     def update_progress(self, status: str, percent: float) -> None:
         self.status_label.setText(status)
@@ -812,93 +936,30 @@ class VideoDownloaderUI(QMainWindow):
             QApplication.processEvents()
 
     def on_download_finished(self, success: bool, message: str, filename: str) -> None:
-        if success:
-            self.status_label.setStyleSheet("color: green;")
-            logger.info(f"Загрузка завершена успешно: {message}")
-            if self.current_download and filename:
-                self.successful_downloads.append((filename, self.current_download.url))
-        else:
-            self.status_label.setStyleSheet("color: red;")
-            logger.error(f"Ошибка загрузки: {message}")
-            if self.current_download:
-                self.failed_downloads.append((self.current_download.url, message))
-
-        self.status_label.setText(message)
-
-        if self.download_queue:
-            self.download_queue.pop(0)
-
-        self.current_download = None
+        self.download_manager.on_download_finished(success, message, filename)
         self.update_queue_display()
 
-        if not self.download_queue:
+        if not self.download_manager.download_queue:
             self.show_download_summary()
             self.set_controls_enabled(True)
         else:
-            self.process_queue()
+            self.start_downloads()
 
     def show_download_summary(self) -> None:
-        if not self.successful_downloads and not self.failed_downloads:
-            return
-        message: str = "Результаты загрузки:\n\n"
-        if self.successful_downloads:
-            message += "Успешно загружены:\n"
-            for filename, _ in self.successful_downloads:
-                if filename.endswith('.webm'):
-                    if '_audio' in filename:
-                        filename = filename.replace('.webm', '.mp3')
-                    else:
-                        filename = filename.replace('.webm', '.mp4')
-                message += f"✓ {filename}\n"
-        if self.failed_downloads:
-            message += "\nНе удалось загрузить:\n"
-            for url, error in self.failed_downloads:
-                short_url: str = url if len(url) <= 50 else url[:50] + "..."
-                message += f"✗ {short_url}\n   Причина: {error}\n"
-        self.cleanup_temp_files()
-        QMessageBox.information(self, "Загрузка завершена", message)
-        self.successful_downloads.clear()
-        self.failed_downloads.clear()
-
-    def cleanup_temp_files(self) -> None:
-        """
-        Очищает временные файлы в папке загрузок.
-        """
-        try:
-            downloads_dir: str = self.current_download.output_dir if self.current_download else 'downloads'
-            if os.path.exists(downloads_dir):
-                for file in os.listdir(downloads_dir):
-                    if file.endswith(('.part', '.ytdl')):
-                        full_path: str = os.path.join(downloads_dir, file)
-                        try:
-                            os.remove(full_path)
-                            logger.info(f"Удалён временный файл: {full_path}")
-                        except Exception as e:
-                            logger.error(f"Ошибка при удалении файла {full_path}: {e}")
-        except Exception as e:
-            logger.error(f"Ошибка при очистке временных файлов: {e}")
+        summary = self.download_manager.get_download_summary()
+        if summary:
+            self.download_manager.cleanup_temp_files()
+            QMessageBox.information(self, "Загрузка завершена", summary)
 
     def cancel_download(self) -> None:
-        if self.current_download:
-            logger.info("Отмена текущей загрузки...")
-            self.current_download.cancel()
-            self.status_label.setText("Загрузка отменяется...")
-            self.status_label.setStyleSheet("color: orange;")
-            # При отмене загрузки сбрасываем индикатор прогресса
-            self.progress_bar.setValue(0)
-            # Восстанавливаем нормальный режим прогресс-бара, если он был в режиме ожидания
-            self.progress_bar.setRange(0, 100)
-
-    def on_mode_changed(self) -> None:
-        is_video: bool = self.video_radio.isChecked()
-        self.resolution_combo.setVisible(is_video)
-        for i in range(self.resolution_layout.count()):
-            widget = self.resolution_layout.itemAt(i).widget()
-            if widget:
-                widget.setVisible(is_video)
+        self.download_manager.cancel_current_download()
+        self.status_label.setText("Загрузка отменяется...")
+        self.status_label.setStyleSheet("color: orange;")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 100)
 
     def clear_queue(self) -> None:
-        if not self.download_queue:
+        if not self.download_manager.download_queue:
             return
         reply = QMessageBox.question(
             self,
@@ -908,66 +969,26 @@ class VideoDownloaderUI(QMainWindow):
             QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.download_queue.clear()
+            self.download_manager.clear_queue()
             self.update_queue_display()
             self.status_label.setText("Очередь очищена")
 
     def remove_selected(self) -> None:
-        current_row: int = self.queue_list.currentRow()
+        current_row = self.queue_list.currentRow()
         if current_row >= 0:
-            del self.download_queue[current_row]
+            self.download_manager.remove_from_queue(current_row)
             self.update_queue_display()
             self.status_label.setText("Элемент удален из очереди")
 
-    def is_valid_video_url(self, url: str) -> Tuple[bool, str]:
-        """
-        Проверяет валидность URL для поддерживаемых видеосервисов.
-        Возвращает кортеж (валидность, сообщение об ошибке).
-        """
-        try:
-            if not url:
-                raise URLValidationError("URL не может быть пустым")
-
-            if not url.startswith(('http://', 'https://')):
-                raise URLValidationError("URL должен начинаться с http:// или https://")
-
-            # Используем глобальный словарь URL_PATTERNS вместо создания его каждый раз
-            for service, service_patterns in URL_PATTERNS.items():
-                for pattern in service_patterns:
-                    if re.match(pattern, url):
-                        logger.info(f"URL валиден для сервиса {service}: {url}")
-                        return True, ""
-
-            for service_name in URL_PATTERNS.keys():
-                if service_name.lower() in url.lower():
-                    raise URLValidationError(f"Неверный формат URL для {service_name}. Проверьте правильность ссылки.")
-
-            return False, "Неподдерживаемый видеосервис или неверный формат URL"
-        except URLValidationError as e:
-            return False, str(e)
-
-    def set_controls_enabled(self, enabled: bool) -> None:
-        """
-        Включает или отключает элементы управления, чтобы предотвратить изменение очереди во время загрузки.
-        """
-        self.url_input.setEnabled(enabled)
-        self.video_radio.setEnabled(enabled)
-        self.audio_radio.setEnabled(enabled)
-        self.resolution_combo.setEnabled(enabled)
-        
     def show_about_dialog(self, event) -> None:
-        """
-        Показывает диалоговое окно с информацией о программе.
-        """
-        # Используем специальную функцию загрузки логотипа в формате PNG
-        success, _, image_path = load_logo((120, 120))
+        """Показывает диалоговое окно с информацией о программе."""
+        success, _, image_path = load_app_logo((120, 120))
         
         # Создаем текст с HTML-форматированием
         if success:
-            # Если изображение найдено, включаем его в HTML с указанием пути
             about_text = (
                 f"<div style='text-align: center;'><img src='{image_path}' width='120' height='120'/></div>"
-                "<h2 style='text-align: center;'>Video Downloader v1.07</h2>"
+                "<h2 style='text-align: center;'>Video Downloader by MaksK v1.07</h2>"
                 "<p>Приложение для скачивания видео и аудио с различных видеохостингов:</p>"
                 "<ul>"
                 "<li>YouTube</li>"
@@ -982,7 +1003,6 @@ class VideoDownloaderUI(QMainWindow):
                 "<p>© 2024-2025 Все права защищены</p>"
             )
         else:
-            # Если изображение не найдено, показываем восклицательный знак
             about_text = (
                 "<div style='text-align: center;'><span style='font-size: 80px; color: red;'>!</span></div>"
                 "<h2 style='text-align: center;'>Video Downloader v1.07</h2>"
@@ -1000,18 +1020,33 @@ class VideoDownloaderUI(QMainWindow):
                 "<p>© 2024-2025 Все права защищены</p>"
             )
         
-        # Создаем кастомное диалоговое окно с изображением
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("О программе")
         msg_box.setTextFormat(Qt.TextFormat.RichText)
         msg_box.setText(about_text)
         msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
         
-        # Устанавливаем иконку, если нужно информационное изображение
         if not success:
             msg_box.setIcon(QMessageBox.Icon.Information)
         
         msg_box.exec()
+
+    def set_controls_enabled(self, enabled: bool) -> None:
+        """
+        Включает или отключает элементы управления, чтобы предотвратить изменение очереди во время загрузки.
+        """
+        self.url_input.setEnabled(enabled)
+        self.video_radio.setEnabled(enabled)
+        self.audio_radio.setEnabled(enabled)
+        self.resolution_combo.setEnabled(enabled)
+
+    def on_mode_changed(self) -> None:
+        is_video: bool = self.video_radio.isChecked()
+        self.resolution_combo.setVisible(is_video)
+        for i in range(self.resolution_layout.count()):
+            widget = self.resolution_layout.itemAt(i).widget()
+            if widget:
+                widget.setVisible(is_video)
 
 # Проверка наличия необходимых компонентов
 def check_ffmpeg() -> bool:
@@ -1053,8 +1088,8 @@ if __name__ == '__main__':
     
     app = QApplication(sys.argv)
     
-    # Установка иконки для всего приложения с использованием load_logo
-    success, pixmap, _ = load_logo((32, 32))
+    # Установка иконки для всего приложения
+    success, pixmap, _ = load_app_logo((32, 32), True)
     if success:
         app_icon = QIcon(pixmap)
         app.setWindowIcon(app_icon)
